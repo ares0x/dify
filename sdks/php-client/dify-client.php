@@ -11,12 +11,19 @@ class DifyClient {
 
     public function __construct($api_key) {
         $this->api_key = $api_key;
-        $this->base_url = "https://api.dify.ai/v1";
+        $this->base_url = "https://api.dify.ai/v1/";
         $this->client = new Client([
             'base_uri' => $this->base_url,
             'headers' => [
                 'Authorization' => 'Bearer ' . $this->api_key,
                 'Content-Type' => 'application/json',
+            ],
+        ]);
+        $this->file_client = new Client([
+            'base_uri' => $this->base_url,
+            'headers' => [
+                'Authorization' => 'Bearer ' . $this->api_key,
+                'Content-Type' => 'multipart/form-data',
             ],
         ]);
     }
@@ -37,40 +44,70 @@ class DifyClient {
             'rating' => $rating,
             'user' => $user,
         ];
-        return $this->send_request('POST', "/messages/{$message_id}/feedbacks", $data);
+        return $this->send_request('POST', "messages/{$message_id}/feedbacks", $data);
     }
 
     public function get_application_parameters($user) {
         $params = ['user' => $user];
-        return $this->send_request('GET', '/parameters', null, $params);
+        return $this->send_request('GET', 'parameters', null, $params);
+    }
+
+    public function file_upload($user, $files) {
+        $data = ['user' => $user];
+        $options = [
+            'multipart' => $this->prepareMultipart($data, $files)
+        ];
+
+        return $this->file_client->request('POST', 'files/upload', $options);
+    }
+
+    protected function prepareMultipart($data, $files) {
+        $multipart = [];
+        foreach ($data as $key => $value) {
+            $multipart[] = [
+                'name' => $key,
+                'contents' => $value
+            ];
+        }
+
+        foreach ($files as $file) {
+            $multipart[] = [
+                'name' => 'file',
+                'contents' => fopen($file['tmp_name'], 'r'),
+                'filename' => $file['name']
+            ];
+        }
+
+        return $multipart;
     }
 }
 
 class CompletionClient extends DifyClient {
-    public function create_completion_message($inputs, $query, $response_mode, $user) {
+    public function create_completion_message($inputs, $response_mode, $user, $files = null) {
         $data = [
             'inputs' => $inputs,
-            'query' => $query,
             'response_mode' => $response_mode,
             'user' => $user,
+            'files' => $files,
         ];
-        return $this->send_request('POST', '/completion-messages', $data, null, $response_mode === 'streaming');
+        return $this->send_request('POST', 'completion-messages', $data, null, $response_mode === 'streaming');
     }
 }
 
 class ChatClient extends DifyClient {
-    public function create_chat_message($inputs, $query, $user, $response_mode = 'blocking', $conversation_id = null) {
+    public function create_chat_message($inputs, $query, $user, $response_mode = 'blocking', $conversation_id = null, $files = null) {
         $data = [
             'inputs' => $inputs,
             'query' => $query,
             'user' => $user,
             'response_mode' => $response_mode,
+            'files' => $files,
         ];
         if ($conversation_id) {
             $data['conversation_id'] = $conversation_id;
         }
 
-        return $this->send_request('POST', '/chat-messages', $data, null, $response_mode === 'streaming');
+        return $this->send_request('POST', 'chat-messages', $data, null, $response_mode === 'streaming');
     }
 
     public function get_conversation_messages($user, $conversation_id = null, $first_id = null, $limit = null) {
@@ -86,7 +123,7 @@ class ChatClient extends DifyClient {
             $params['limit'] = $limit;
         }
 
-        return $this->send_request('GET', '/messages', null, $params);
+        return $this->send_request('GET', 'messages', null, $params);
     }
 
     public function get_conversations($user, $first_id = null, $limit = null, $pinned = null) {
@@ -96,7 +133,7 @@ class ChatClient extends DifyClient {
             'limit' => $limit,
             'pinned'=> $pinned,
         ];
-        return $this->send_request('GET', '/conversations', null, $params);
+        return $this->send_request('GET', 'conversations', null, $params);
     }
 
     public function rename_conversation($conversation_id, $name, $user) {
@@ -104,6 +141,6 @@ class ChatClient extends DifyClient {
             'name' => $name,
             'user' => $user,
         ];
-        return $this->send_request('PATCH', "/conversations/{$conversation_id}", $data);
+        return $this->send_request('PATCH', "conversations/{$conversation_id}", $data);
     }
 }

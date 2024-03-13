@@ -1,17 +1,22 @@
-import datetime
+import base64
 import json
-import random
-import string
+import secrets
 
 import click
+from flask import current_app
+from werkzeug.exceptions import NotFound
 
-from libs.password import password_pattern, valid_password, hash_password
-from libs.helper import email as email_validate
+from core.rag.datasource.vdb.vector_factory import Vector
+from core.rag.models.document import Document
 from extensions.ext_database import db
-from models.account import InvitationCode
-from models.model import Account, AppModelConfig, ApiToken, Site, App, RecommendedApp
-import secrets
-import base64
+from libs.helper import email as email_validate
+from libs.password import hash_password, password_pattern, valid_password
+from libs.rsa import generate_key_pair
+from models.account import Tenant
+from models.dataset import Dataset, DatasetCollectionBinding, DocumentSegment
+from models.dataset import Document as DatasetDocument
+from models.model import Account, App, AppAnnotationSetting, MessageAnnotation
+from models.provider import Provider, ProviderModel
 
 
 @click.command('reset-password', help='Reset the account password.')
@@ -19,15 +24,22 @@ import base64
 @click.option('--new-password', prompt=True, help='the new password.')
 @click.option('--password-confirm', prompt=True, help='the new password confirm.')
 def reset_password(email, new_password, password_confirm):
+    """
+    Reset password of owner account
+    Only available in SELF_HOSTED mode
+    """
     if str(new_password).strip() != str(password_confirm).strip():
         click.echo(click.style('sorry. The two passwords do not match.', fg='red'))
         return
+
     account = db.session.query(Account). \
         filter(Account.email == email). \
         one_or_none()
+
     if not account:
         click.echo(click.style('sorry. the account: [{}] not exist .'.format(email), fg='red'))
         return
+
     try:
         valid_password(new_password)
     except:
@@ -53,15 +65,22 @@ def reset_password(email, new_password, password_confirm):
 @click.option('--new-email', prompt=True, help='the new email.')
 @click.option('--email-confirm', prompt=True, help='the new email confirm.')
 def reset_email(email, new_email, email_confirm):
+    """
+    Replace account email
+    :return:
+    """
     if str(new_email).strip() != str(email_confirm).strip():
         click.echo(click.style('Sorry, new email and confirm email do not match.', fg='red'))
         return
+
     account = db.session.query(Account). \
         filter(Account.email == email). \
         one_or_none()
+
     if not account:
         click.echo(click.style('sorry. the account: [{}] not exist .'.format(email), fg='red'))
         return
+
     try:
         email_validate(new_email)
     except:
@@ -74,87 +93,285 @@ def reset_email(email, new_email, email_confirm):
     click.echo(click.style('Congratulations!, email has been reset.', fg='green'))
 
 
-@click.command('generate-invitation-codes', help='Generate invitation codes.')
-@click.option('--batch', help='The batch of invitation codes.')
-@click.option('--count', prompt=True, help='Invitation codes count.')
-def generate_invitation_codes(batch, count):
-    if not batch:
-        now = datetime.datetime.now()
-        batch = now.strftime('%Y%m%d%H%M%S')
-
-    if not count or int(count) <= 0:
-        click.echo(click.style('sorry. the count must be greater than 0.', fg='red'))
+@click.command('reset-encrypt-key-pair', help='Reset the asymmetric key pair of workspace for encrypt LLM credentials. '
+                                              'After the reset, all LLM credentials will become invalid, '
+                                              'requiring re-entry.'
+                                              'Only support SELF_HOSTED mode.')
+@click.confirmation_option(prompt=click.style('Are you sure you want to reset encrypt key pair?'
+                                              ' this operation cannot be rolled back!', fg='red'))
+def reset_encrypt_key_pair():
+    """
+    Reset the encrypted key pair of workspace for encrypt LLM credentials.
+    After the reset, all LLM credentials will become invalid, requiring re-entry.
+    Only support SELF_HOSTED mode.
+    """
+    if current_app.config['EDITION'] != 'SELF_HOSTED':
+        click.echo(click.style('Sorry, only support SELF_HOSTED mode.', fg='red'))
         return
 
-    count = int(count)
+    tenant = db.session.query(Tenant).first()
+    if not tenant:
+        click.echo(click.style('Sorry, no workspace found. Please enter /install to initialize.', fg='red'))
+        return
 
-    click.echo('Start generate {} invitation codes for batch {}.'.format(count, batch))
+    tenant.encrypt_public_key = generate_key_pair(tenant.id)
 
-    codes = ''
-    for i in range(count):
-        code = generate_invitation_code()
-        invitation_code = InvitationCode(
-            code=code,
-            batch=batch
-        )
-        db.session.add(invitation_code)
-        click.echo(code)
-
-        codes += code + "\n"
+    db.session.query(Provider).filter(Provider.provider_type == 'custom').delete()
+    db.session.query(ProviderModel).delete()
     db.session.commit()
 
-    filename = 'storage/invitation-codes-{}.txt'.format(batch)
-
-    with open(filename, 'w') as f:
-        f.write(codes)
-
-    click.echo(click.style(
-        'Congratulations! Generated {} invitation codes for batch {} and saved to the file \'{}\''.format(count, batch,
-                                                                                                          filename),
-        fg='green'))
+    click.echo(click.style('Congratulations! '
+                           'the asymmetric key pair of workspace {} has been reset.'.format(tenant.id), fg='green'))
 
 
-def generate_invitation_code():
-    code = generate_upper_string()
-    while db.session.query(InvitationCode).filter(InvitationCode.code == code).count() > 0:
-        code = generate_upper_string()
-
-    return code
-
-
-def generate_upper_string():
-    letters_digits = string.ascii_uppercase + string.digits
-    result = ""
-    for i in range(8):
-        result += random.choice(letters_digits)
-
-    return result
+@click.command('vdb-migrate', help='migrate vector db.')
+@click.option('--scope', default='all', prompt=False, help='The scope of vector database to migrate, Default is All.')
+def vdb_migrate(scope: str):
+    if scope in ['knowledge', 'all']:
+        migrate_knowledge_vector_database()
+    if scope in ['annotation', 'all']:
+        migrate_annotation_vector_database()
 
 
-@click.command('gen-recommended-apps', help='Number of records to generate')
-def generate_recommended_apps():
-    print('Generating recommended app data...')
-    apps = App.query.all()
-    for app in apps:
-        recommended_app = RecommendedApp(
-            app_id=app.id,
-            description={
-                'en': 'Description for ' + app.name,
-                'zh': '描述 ' + app.name
-            },
-            copyright='Copyright ' + str(random.randint(1990, 2020)),
-            privacy_policy='https://privacypolicy.example.com',
-            category=random.choice(['Games', 'News', 'Music', 'Sports']),
-            position=random.randint(1, 100),
-            install_count=random.randint(100, 100000)
-        )
-        db.session.add(recommended_app)
-    db.session.commit()
-    print('Done!')
+def migrate_annotation_vector_database():
+    """
+    Migrate annotation datas to target vector database .
+    """
+    click.echo(click.style('Start migrate annotation data.', fg='green'))
+    create_count = 0
+    skipped_count = 0
+    total_count = 0
+    page = 1
+    while True:
+        try:
+            # get apps info
+            apps = db.session.query(App).filter(
+                App.status == 'normal'
+            ).order_by(App.created_at.desc()).paginate(page=page, per_page=50)
+        except NotFound:
+            break
+
+        page += 1
+        for app in apps:
+            total_count = total_count + 1
+            click.echo(f'Processing the {total_count} app {app.id}. '
+                       + f'{create_count} created, {skipped_count} skipped.')
+            try:
+                click.echo('Create app annotation index: {}'.format(app.id))
+                app_annotation_setting = db.session.query(AppAnnotationSetting).filter(
+                    AppAnnotationSetting.app_id == app.id
+                ).first()
+
+                if not app_annotation_setting:
+                    skipped_count = skipped_count + 1
+                    click.echo('App annotation setting is disabled: {}'.format(app.id))
+                    continue
+                # get dataset_collection_binding info
+                dataset_collection_binding = db.session.query(DatasetCollectionBinding).filter(
+                    DatasetCollectionBinding.id == app_annotation_setting.collection_binding_id
+                ).first()
+                if not dataset_collection_binding:
+                    click.echo('App annotation collection binding is not exist: {}'.format(app.id))
+                    continue
+                annotations = db.session.query(MessageAnnotation).filter(MessageAnnotation.app_id == app.id).all()
+                dataset = Dataset(
+                    id=app.id,
+                    tenant_id=app.tenant_id,
+                    indexing_technique='high_quality',
+                    embedding_model_provider=dataset_collection_binding.provider_name,
+                    embedding_model=dataset_collection_binding.model_name,
+                    collection_binding_id=dataset_collection_binding.id
+                )
+                documents = []
+                if annotations:
+                    for annotation in annotations:
+                        document = Document(
+                            page_content=annotation.question,
+                            metadata={
+                                "annotation_id": annotation.id,
+                                "app_id": app.id,
+                                "doc_id": annotation.id
+                            }
+                        )
+                        documents.append(document)
+
+                vector = Vector(dataset, attributes=['doc_id', 'annotation_id', 'app_id'])
+                click.echo(f"Start to migrate annotation, app_id: {app.id}.")
+
+                try:
+                    vector.delete()
+                    click.echo(
+                        click.style(f'Successfully delete vector index for app: {app.id}.',
+                                    fg='green'))
+                except Exception as e:
+                    click.echo(
+                        click.style(f'Failed to delete vector index for app {app.id}.',
+                                    fg='red'))
+                    raise e
+                if documents:
+                    try:
+                        click.echo(click.style(
+                            f'Start to created vector index with {len(documents)} annotations for app {app.id}.',
+                            fg='green'))
+                        vector.create(documents)
+                        click.echo(
+                            click.style(f'Successfully created vector index for app {app.id}.', fg='green'))
+                    except Exception as e:
+                        click.echo(click.style(f'Failed to created vector index for app {app.id}.', fg='red'))
+                        raise e
+                click.echo(f'Successfully migrated app annotation {app.id}.')
+                create_count += 1
+            except Exception as e:
+                click.echo(
+                    click.style('Create app annotation index error: {} {}'.format(e.__class__.__name__, str(e)),
+                                fg='red'))
+                continue
+
+    click.echo(
+        click.style(f'Congratulations! Create {create_count} app annotation indexes, and skipped {skipped_count} apps.',
+                    fg='green'))
+
+
+def migrate_knowledge_vector_database():
+    """
+    Migrate vector database datas to target vector database .
+    """
+    click.echo(click.style('Start migrate vector db.', fg='green'))
+    create_count = 0
+    skipped_count = 0
+    total_count = 0
+    config = current_app.config
+    vector_type = config.get('VECTOR_STORE')
+    page = 1
+    while True:
+        try:
+            datasets = db.session.query(Dataset).filter(Dataset.indexing_technique == 'high_quality') \
+                .order_by(Dataset.created_at.desc()).paginate(page=page, per_page=50)
+        except NotFound:
+            break
+
+        page += 1
+        for dataset in datasets:
+            total_count = total_count + 1
+            click.echo(f'Processing the {total_count} dataset {dataset.id}. '
+                       + f'{create_count} created, ${skipped_count} skipped.')
+            try:
+                click.echo('Create dataset vdb index: {}'.format(dataset.id))
+                if dataset.index_struct_dict:
+                    if dataset.index_struct_dict['type'] == vector_type:
+                        skipped_count = skipped_count + 1
+                        continue
+                collection_name = ''
+                if vector_type == "weaviate":
+                    dataset_id = dataset.id
+                    collection_name = Dataset.gen_collection_name_by_id(dataset_id)
+                    index_struct_dict = {
+                        "type": 'weaviate',
+                        "vector_store": {"class_prefix": collection_name}
+                    }
+                    dataset.index_struct = json.dumps(index_struct_dict)
+                elif vector_type == "qdrant":
+                    if dataset.collection_binding_id:
+                        dataset_collection_binding = db.session.query(DatasetCollectionBinding). \
+                            filter(DatasetCollectionBinding.id == dataset.collection_binding_id). \
+                            one_or_none()
+                        if dataset_collection_binding:
+                            collection_name = dataset_collection_binding.collection_name
+                        else:
+                            raise ValueError('Dataset Collection Bindings is not exist!')
+                    else:
+                        dataset_id = dataset.id
+                        collection_name = Dataset.gen_collection_name_by_id(dataset_id)
+                    index_struct_dict = {
+                        "type": 'qdrant',
+                        "vector_store": {"class_prefix": collection_name}
+                    }
+                    dataset.index_struct = json.dumps(index_struct_dict)
+
+                elif vector_type == "milvus":
+                    dataset_id = dataset.id
+                    collection_name = Dataset.gen_collection_name_by_id(dataset_id)
+                    index_struct_dict = {
+                        "type": 'milvus',
+                        "vector_store": {"class_prefix": collection_name}
+                    }
+                    dataset.index_struct = json.dumps(index_struct_dict)
+                else:
+                    raise ValueError(f"Vector store {config.get('VECTOR_STORE')} is not supported.")
+
+                vector = Vector(dataset)
+                click.echo(f"Start to migrate dataset {dataset.id}.")
+
+                try:
+                    vector.delete()
+                    click.echo(
+                        click.style(f'Successfully delete vector index {collection_name} for dataset {dataset.id}.',
+                                    fg='green'))
+                except Exception as e:
+                    click.echo(
+                        click.style(f'Failed to delete vector index {collection_name} for dataset {dataset.id}.',
+                                    fg='red'))
+                    raise e
+
+                dataset_documents = db.session.query(DatasetDocument).filter(
+                    DatasetDocument.dataset_id == dataset.id,
+                    DatasetDocument.indexing_status == 'completed',
+                    DatasetDocument.enabled == True,
+                    DatasetDocument.archived == False,
+                ).all()
+
+                documents = []
+                segments_count = 0
+                for dataset_document in dataset_documents:
+                    segments = db.session.query(DocumentSegment).filter(
+                        DocumentSegment.document_id == dataset_document.id,
+                        DocumentSegment.status == 'completed',
+                        DocumentSegment.enabled == True
+                    ).all()
+
+                    for segment in segments:
+                        document = Document(
+                            page_content=segment.content,
+                            metadata={
+                                "doc_id": segment.index_node_id,
+                                "doc_hash": segment.index_node_hash,
+                                "document_id": segment.document_id,
+                                "dataset_id": segment.dataset_id,
+                            }
+                        )
+
+                        documents.append(document)
+                        segments_count = segments_count + 1
+
+                if documents:
+                    try:
+                        click.echo(click.style(
+                            f'Start to created vector index with {len(documents)} documents of {segments_count} segments for dataset {dataset.id}.',
+                            fg='green'))
+                        vector.create(documents)
+                        click.echo(
+                            click.style(f'Successfully created vector index for dataset {dataset.id}.', fg='green'))
+                    except Exception as e:
+                        click.echo(click.style(f'Failed to created vector index for dataset {dataset.id}.', fg='red'))
+                        raise e
+                db.session.add(dataset)
+                db.session.commit()
+                click.echo(f'Successfully migrated dataset {dataset.id}.')
+                create_count += 1
+            except Exception as e:
+                db.session.rollback()
+                click.echo(
+                    click.style('Create dataset index error: {} {}'.format(e.__class__.__name__, str(e)),
+                                fg='red'))
+                continue
+
+    click.echo(
+        click.style(f'Congratulations! Create {create_count} dataset indexes, and skipped {skipped_count} datasets.',
+                    fg='green'))
 
 
 def register_commands(app):
     app.cli.add_command(reset_password)
     app.cli.add_command(reset_email)
-    app.cli.add_command(generate_invitation_codes)
-    app.cli.add_command(generate_recommended_apps)
+    app.cli.add_command(reset_encrypt_key_pair)
+    app.cli.add_command(vdb_migrate)

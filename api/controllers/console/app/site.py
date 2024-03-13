@@ -1,31 +1,16 @@
-# -*- coding:utf-8 -*-
-from flask_login import login_required, current_user
-from flask_restful import Resource, reqparse, fields, marshal_with
-from werkzeug.exceptions import NotFound, Forbidden
+from flask_login import current_user
+from flask_restful import Resource, marshal_with, reqparse
+from werkzeug.exceptions import Forbidden, NotFound
 
+from constants.languages import supported_language
 from controllers.console import api
 from controllers.console.app import _get_app
 from controllers.console.setup import setup_required
 from controllers.console.wraps import account_initialization_required
-from libs.helper import supported_language
 from extensions.ext_database import db
+from fields.app_fields import app_site_fields
+from libs.login import login_required
 from models.model import Site
-
-app_site_fields = {
-    'app_id': fields.String,
-    'access_token': fields.String(attribute='code'),
-    'code': fields.String,
-    'title': fields.String,
-    'icon': fields.String,
-    'icon_background': fields.String,
-    'description': fields.String,
-    'default_language': fields.String,
-    'customize_domain': fields.String,
-    'copyright': fields.String,
-    'privacy_policy': fields.String,
-    'customize_token_strategy': fields.String,
-    'prompt_public': fields.Boolean
-}
 
 
 def parse_app_site_args():
@@ -57,7 +42,7 @@ class AppSite(Resource):
         app_model = _get_app(app_id)
 
         # The role of the current user in the ta table must be admin or owner
-        if current_user.current_tenant.current_role not in ['admin', 'owner']:
+        if not current_user.is_admin_or_owner:
             raise Forbidden()
 
         site = db.session.query(Site). \
@@ -80,6 +65,13 @@ class AppSite(Resource):
             if value is not None:
                 setattr(site, attr_name, value)
 
+                if attr_name == 'title':
+                    app_model.name = value
+                elif attr_name == 'icon':
+                    app_model.icon = value
+                elif attr_name == 'icon_background':
+                    app_model.icon_background = value
+
         db.session.commit()
 
         return site
@@ -96,7 +88,7 @@ class AppSiteAccessTokenReset(Resource):
         app_model = _get_app(app_id)
 
         # The role of the current user in the ta table must be admin or owner
-        if current_user.current_tenant.current_role not in ['admin', 'owner']:
+        if not current_user.is_admin_or_owner:
             raise Forbidden()
 
         site = db.session.query(Site).filter(Site.app_id == app_model.id).first()

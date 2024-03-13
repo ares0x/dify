@@ -1,11 +1,11 @@
-# -*- coding:utf-8 -*-
+import random
 import re
+import string
 import subprocess
 import uuid
 from datetime import datetime
+from hashlib import sha256
 from zoneinfo import available_timezones
-import random
-import string
 
 from flask_restful import fields
 
@@ -21,7 +21,7 @@ class TimestampField(fields.Raw):
 
 def email(email):
     # Define a regex pattern for email addresses
-    pattern = r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$"
+    pattern = r"^[\w\.-]+@([\w-]+\.)+[\w-]{2,}$"
     # Check if the email matches the pattern
     if re.match(pattern, email) is not None:
         return email
@@ -56,7 +56,7 @@ def timestamp_value(timestamp):
         raise ValueError(error)
 
 
-class str_len(object):
+class str_len:
     """ Restrict input to an integer in a range (inclusive) """
 
     def __init__(self, max_length, argument='argument'):
@@ -73,7 +73,7 @@ class str_len(object):
         return value
 
 
-class float_range(object):
+class float_range:
     """ Restrict input to an float in a range (inclusive) """
     def __init__(self, low, high, argument='argument'):
         self.low = low
@@ -90,7 +90,7 @@ class float_range(object):
         return value
 
 
-class datetime_string(object):
+class datetime_string:
     def __init__(self, format, argument='argument'):
         self.format = format
         self.argument = argument
@@ -100,7 +100,7 @@ class datetime_string(object):
             datetime.strptime(value, self.format)
         except ValueError:
             error = ('Invalid {arg}: {val}. {arg} must be conform to the format {format}'
-                     .format(arg=self.argument, val=value, lo=self.format))
+                     .format(arg=self.argument, val=value, format=self.format))
             raise ValueError(error)
 
         return value
@@ -110,17 +110,7 @@ def _get_float(value):
     try:
         return float(value)
     except (TypeError, ValueError):
-        raise ValueError('{0} is not a valid float'.format(value))
-
-
-def supported_language(lang):
-    if lang in ['en-US', 'zh-Hans']:
-        return lang
-
-    error = ('{lang} is not a valid language.'
-             .format(lang=lang))
-    raise ValueError(error)
-
+        raise ValueError('{} is not a valid float'.format(value))
 
 def timezone(timezone_string):
     if timezone_string and timezone_string in available_timezones():
@@ -147,3 +137,8 @@ def get_remote_ip(request):
         return request.headers.getlist("X-Forwarded-For")[0]
     else:
         return request.remote_addr
+
+
+def generate_text_hash(text: str) -> str:
+    hash_text = str(text) + 'None'
+    return sha256(hash_text.encode()).hexdigest()

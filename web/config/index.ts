@@ -1,40 +1,34 @@
-const isDevelopment = process.env.NODE_ENV === 'development';
+/* eslint-disable import/no-mutable-exports */
+import { AgentStrategy } from '@/types/app'
 
-export let apiPrefix = '';
-let publicApiPrefix = '';
+export let apiPrefix = ''
+export let publicApiPrefix = ''
 
 // NEXT_PUBLIC_API_PREFIX=/console/api NEXT_PUBLIC_PUBLIC_API_PREFIX=/api npm run start
 if (process.env.NEXT_PUBLIC_API_PREFIX && process.env.NEXT_PUBLIC_PUBLIC_API_PREFIX) {
-  apiPrefix = process.env.NEXT_PUBLIC_API_PREFIX;
-  publicApiPrefix = process.env.NEXT_PUBLIC_PUBLIC_API_PREFIX;
-} else if (
-  globalThis.document?.body?.getAttribute('data-api-prefix') &&
-  globalThis.document?.body?.getAttribute('data-pubic-api-prefix')
+  apiPrefix = process.env.NEXT_PUBLIC_API_PREFIX
+  publicApiPrefix = process.env.NEXT_PUBLIC_PUBLIC_API_PREFIX
+}
+else if (
+  globalThis.document?.body?.getAttribute('data-api-prefix')
+  && globalThis.document?.body?.getAttribute('data-pubic-api-prefix')
 ) {
   // Not bulild can not get env from process.env.NEXT_PUBLIC_ in browser https://nextjs.org/docs/basic-features/environment-variables#exposing-environment-variables-to-the-browser
   apiPrefix = globalThis.document.body.getAttribute('data-api-prefix') as string
   publicApiPrefix = globalThis.document.body.getAttribute('data-pubic-api-prefix') as string
-} else {
-  if (isDevelopment) {
-    apiPrefix = 'https://cloud.dify.dev/console/api';
-    publicApiPrefix = 'https://dev.udify.app/api';
-  } else {
-    // const domainParts = globalThis.location?.host?.split('.');
-    // in production env, the host is dify.app . In other env, the host is [dev].dify.app
-    // const env = domainParts.length === 2 ? 'ai' : domainParts?.[0];
-    apiPrefix = '/console/api';
-    publicApiPrefix = `/api`; // avoid browser private mode api cross origin
-  }
+}
+else {
+  // const domainParts = globalThis.location?.host?.split('.');
+  // in production env, the host is dify.app . In other env, the host is [dev].dify.app
+  // const env = domainParts.length === 2 ? 'ai' : domainParts?.[0];
+  apiPrefix = 'http://localhost:5001/console/api'
+  publicApiPrefix = 'http://localhost:5001/api' // avoid browser private mode api cross origin
 }
 
+export const API_PREFIX: string = apiPrefix
+export const PUBLIC_API_PREFIX: string = publicApiPrefix
 
-export const API_PREFIX: string = apiPrefix;
-export const PUBLIC_API_PREFIX: string = publicApiPrefix;
-
-// mock server
-export const MOCK_API_PREFIX = 'http://127.0.0.1:3001'
-
-const EDITION = process.env.NEXT_PUBLIC_EDITION || globalThis.document?.body?.getAttribute('data-public-edition')
+const EDITION = process.env.NEXT_PUBLIC_EDITION || globalThis.document?.body?.getAttribute('data-public-edition') || 'SELF_HOSTED'
 export const IS_CE_EDITION = EDITION === 'SELF_HOSTED'
 
 export const TONE_LIST = [
@@ -74,31 +68,160 @@ export const TONE_LIST = [
   },
 ]
 
+export const DEFAULT_CHAT_PROMPT_CONFIG = {
+  prompt: [],
+}
+
+export const DEFAULT_COMPLETION_PROMPT_CONFIG = {
+  prompt: {
+    text: '',
+  },
+  conversation_histories_role: {
+    user_prefix: '',
+    assistant_prefix: '',
+  },
+}
+
+export const getMaxToken = (modelId: string) => {
+  return (modelId === 'gpt-4' || modelId === 'gpt-3.5-turbo-16k') ? 8000 : 4000
+}
+
 export const LOCALE_COOKIE_NAME = 'locale'
 
 export const DEFAULT_VALUE_MAX_LEN = 48
+export const DEFAULT_PARAGRAPH_VALUE_MAX_LEN = 1000
 
-export const zhRegex = /^[\u4e00-\u9fa5]$/gm
-export const emojiRegex = /^[\uD800-\uDBFF][\uDC00-\uDFFF]$/gm
-export const emailRegex = /^(([^<>()[\]\\.,;:\s@\"]+(\.[^<>()[\]\\.,;:\s@\"]+)*)|(\".+\"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/
+export const zhRegex = /^[\u4E00-\u9FA5]$/m
+export const emojiRegex = /^[\uD800-\uDBFF][\uDC00-\uDFFF]$/m
+export const emailRegex = /^[\w\.-]+@([\w-]+\.)+[\w-]{2,}$/m
 const MAX_ZN_VAR_NAME_LENGHT = 8
-const MAX_EN_VAR_VALUE_LENGHT = 16
+const MAX_EN_VAR_VALUE_LENGHT = 30
 export const getMaxVarNameLength = (value: string) => {
-  if (zhRegex.test(value)) {
+  if (zhRegex.test(value))
     return MAX_ZN_VAR_NAME_LENGHT
-  }
+
   return MAX_EN_VAR_VALUE_LENGHT
 }
 
-export const MAX_VAR_KEY_LENGHT = 16
+export const MAX_VAR_KEY_LENGHT = 30
+
+export const MAX_PROMPT_MESSAGE_LENGTH = 10
 
 export const VAR_ITEM_TEMPLATE = {
   key: '',
   name: '',
   type: 'string',
   max_length: DEFAULT_VALUE_MAX_LEN,
-  required: true
+  required: true,
 }
 
+export const appDefaultIconBackground = '#D5F5F6'
 
+export const NEED_REFRESH_APP_LIST_KEY = 'needRefreshAppList'
 
+export const DATASET_DEFAULT = {
+  top_k: 2,
+  score_threshold: 0.5,
+}
+
+export const APP_PAGE_LIMIT = 10
+
+export const ANNOTATION_DEFAULT = {
+  score_threshold: 0.9,
+}
+
+export const MAX_TOOLS_NUM = 10
+
+export const DEFAULT_AGENT_SETTING = {
+  enabled: false,
+  max_iteration: 5,
+  strategy: AgentStrategy.functionCall,
+  tools: [],
+}
+
+export const DEFAULT_AGENT_PROMPT = {
+  chat: `Respond to the human as helpfully and accurately as possible. 
+
+  {{instruction}}
+  
+  You have access to the following tools:
+  
+  {{tools}}
+  
+  Use a json blob to specify a tool by providing an {{TOOL_NAME_KEY}} key (tool name) and an {{ACTION_INPUT_KEY}} key (tool input).
+  Valid "{{TOOL_NAME_KEY}}" values: "Final Answer" or {{tool_names}}
+  
+  Provide only ONE action per $JSON_BLOB, as shown:
+  
+  \`\`\`
+  {
+    "{{TOOL_NAME_KEY}}": $TOOL_NAME,
+    "{{ACTION_INPUT_KEY}}": $ACTION_INPUT
+  }
+  \`\`\`
+  
+  Follow this format:
+  
+  Question: input question to answer
+  Thought: consider previous and subsequent steps
+  Action:
+  \`\`\`
+  $JSON_BLOB
+  \`\`\`
+  Observation: action result
+  ... (repeat Thought/Action/Observation N times)
+  Thought: I know what to respond
+  Action:
+  \`\`\`
+  {
+    "{{TOOL_NAME_KEY}}": "Final Answer",
+    "{{ACTION_INPUT_KEY}}": "Final response to human"
+  }
+  \`\`\`
+  
+  Begin! Reminder to ALWAYS respond with a valid json blob of a single action. Use tools if necessary. Respond directly if appropriate. Format is Action:\`\`\`$JSON_BLOB\`\`\`then Observation:.`,
+  completion: `
+  Respond to the human as helpfully and accurately as possible. 
+
+{{instruction}}
+
+You have access to the following tools:
+
+{{tools}}
+
+Use a json blob to specify a tool by providing an {{TOOL_NAME_KEY}} key (tool name) and an {{ACTION_INPUT_KEY}} key (tool input).
+Valid "{{TOOL_NAME_KEY}}" values: "Final Answer" or {{tool_names}}
+
+Provide only ONE action per $JSON_BLOB, as shown:
+
+\`\`\`
+{{{{
+  "{{TOOL_NAME_KEY}}": $TOOL_NAME,
+  "{{ACTION_INPUT_KEY}}": $ACTION_INPUT
+}}}}
+\`\`\`
+
+Follow this format:
+
+Question: input question to answer
+Thought: consider previous and subsequent steps
+Action:
+\`\`\`
+$JSON_BLOB
+\`\`\`
+Observation: action result
+... (repeat Thought/Action/Observation N times)
+Thought: I know what to respond
+Action:
+\`\`\`
+{{{{
+  "{{TOOL_NAME_KEY}}": "Final Answer",
+  "{{ACTION_INPUT_KEY}}": "Final response to human"
+}}}}
+\`\`\`
+
+Begin! Reminder to ALWAYS respond with a valid json blob of a single action. Use tools if necessary. Respond directly if appropriate. Format is Action:\`\`\`$JSON_BLOB\`\`\`then Observation:.
+Question: {{query}}
+Thought: {{agent_scratchpad}}
+  `,
+}

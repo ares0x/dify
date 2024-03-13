@@ -1,12 +1,9 @@
-# -*- coding:utf-8 -*-
-import flask
 import flask_login
-from flask import request, current_app
+from flask import current_app, request
 from flask_restful import Resource, reqparse
 
 import services
 from controllers.console import api
-from controllers.console.error import AccountNotLinkTenantError
 from controllers.console.setup import setup_required
 from libs.helper import email
 from libs.password import valid_password
@@ -32,24 +29,20 @@ class LoginApi(Resource):
         except services.errors.account.AccountLoginError:
             return {'code': 'unauthorized', 'message': 'Invalid email or password'}, 401
 
-        try:
-            TenantService.switch_tenant(account)
-        except Exception:
-            raise AccountNotLinkTenantError("Account not link tenant")
+        TenantService.create_owner_tenant_if_not_exist(account)
 
-        flask_login.login_user(account, remember=args['remember_me'])
         AccountService.update_last_login(account, request)
 
         # todo: return the user info
+        token = AccountService.get_account_jwt_token(account)
 
-        return {'result': 'success'}
+        return {'result': 'success', 'data': token}
 
 
 class LogoutApi(Resource):
 
     @setup_required
     def get(self):
-        flask.session.pop('workspace_id', None)
         flask_login.logout_user()
         return {'result': 'success'}
 

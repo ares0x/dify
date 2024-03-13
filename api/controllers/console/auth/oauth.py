@@ -2,15 +2,16 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-import flask_login
 import requests
-from flask import request, redirect, current_app, session
+from flask import current_app, redirect, request
 from flask_restful import Resource
 
-from libs.oauth import OAuthUserInfo, GitHubOAuth, GoogleOAuth
+from constants.languages import languages
 from extensions.ext_database import db
+from libs.oauth import GitHubOAuth, GoogleOAuth, OAuthUserInfo
 from models.account import Account, AccountStatus
-from services.account_service import AccountService, RegisterService
+from services.account_service import AccountService, RegisterService, TenantService
+
 from .. import api
 
 
@@ -20,13 +21,13 @@ def get_oauth_providers():
                                    client_secret=current_app.config.get(
                                        'GITHUB_CLIENT_SECRET'),
                                    redirect_uri=current_app.config.get(
-                                       'CONSOLE_URL') + '/console/api/oauth/authorize/github')
+                                       'CONSOLE_API_URL') + '/console/api/oauth/authorize/github')
 
         google_oauth = GoogleOAuth(client_id=current_app.config.get('GOOGLE_CLIENT_ID'),
                                    client_secret=current_app.config.get(
                                        'GOOGLE_CLIENT_SECRET'),
                                    redirect_uri=current_app.config.get(
-                                       'CONSOLE_URL') + '/console/api/oauth/authorize/google')
+                                       'CONSOLE_API_URL') + '/console/api/oauth/authorize/google')
 
         OAUTH_PROVIDERS = {
             'github': github_oauth,
@@ -75,12 +76,13 @@ class OAuthCallback(Resource):
             account.initialized_at = datetime.utcnow()
             db.session.commit()
 
-        # login user
-        session.clear()
-        flask_login.login_user(account, remember=True)
+        TenantService.create_owner_tenant_if_not_exist(account)
+
         AccountService.update_last_login(account, request)
 
-        return redirect(f'{current_app.config.get("CONSOLE_URL")}?oauth_login=success')
+        token = AccountService.get_account_jwt_token(account)
+
+        return redirect(f'{current_app.config.get("CONSOLE_WEB_URL")}?console_token={token}')
 
 
 def _get_account_by_openid_or_email(provider: str, user_info: OAuthUserInfo) -> Optional[Account]:
@@ -108,11 +110,11 @@ def _generate_account(provider: str, user_info: OAuthUserInfo):
         )
 
         # Set interface language
-        preferred_lang = request.accept_languages.best_match(['zh', 'en'])
-        if preferred_lang == 'zh':
-            interface_language = 'zh-Hans'
+        preferred_lang = request.accept_languages.best_match(languages)
+        if preferred_lang and preferred_lang in languages:
+            interface_language = preferred_lang
         else:
-            interface_language = 'en-US'
+            interface_language = languages[0]
         account.interface_language = interface_language
         db.session.commit()
 

@@ -1,24 +1,35 @@
 'use client'
-import React, { FC } from 'react'
+import type { FC } from 'react'
+import React from 'react'
 import { useTranslation } from 'react-i18next'
-import Modal from '@/app/components/base/modal'
-import FeatureItem from './feature-item'
 import FeatureGroup from '../feature-group'
 import MoreLikeThisIcon from '../../../base/icons/more-like-this-icon'
+import FeatureItem from './feature-item'
+import Modal from '@/app/components/base/modal'
 import SuggestedQuestionsAfterAnswerIcon from '@/app/components/app/configuration/base/icons/suggested-questions-after-answer-icon'
-
-interface IConfig {
+import { Microphone01, Speaker } from '@/app/components/base/icons/src/vender/solid/mediaAndDevices'
+import { Citations } from '@/app/components/base/icons/src/vender/solid/editor'
+import { FileSearch02 } from '@/app/components/base/icons/src/vender/solid/files'
+import { MessageFast } from '@/app/components/base/icons/src/vender/solid/communication'
+type IConfig = {
   openingStatement: boolean
   moreLikeThis: boolean
   suggestedQuestionsAfterAnswer: boolean
+  speechToText: boolean
+  textToSpeech: boolean
+  citation: boolean
+  moderation: boolean
+  annotation: boolean
 }
 
-export interface IChooseFeatureProps {
+export type IChooseFeatureProps = {
   isShow: boolean
   onClose: () => void
   config: IConfig
   isChatApp: boolean
   onChange: (key: string, value: boolean) => void
+  showTextToSpeechItem?: boolean
+  showSpeechToTextItem?: boolean
 }
 
 const OpeningStatementIcon = (
@@ -32,10 +43,11 @@ const ChooseFeature: FC<IChooseFeatureProps> = ({
   onClose,
   isChatApp,
   config,
-  onChange
+  onChange,
+  showTextToSpeechItem,
+  showSpeechToTextItem,
 }) => {
   const { t } = useTranslation()
-
   return (
     <Modal
       isShow={isShow}
@@ -43,6 +55,7 @@ const ChooseFeature: FC<IChooseFeatureProps> = ({
       className='w-[400px]'
       title={t('appDebug.operation.addFeature')}
       closable
+      overflowVisible
     >
       <div className='pt-5 pb-10'>
         {/* Chat Feature */}
@@ -54,17 +67,51 @@ const ChooseFeature: FC<IChooseFeatureProps> = ({
             <>
               <FeatureItem
                 icon={OpeningStatementIcon}
+                previewImgClassName='openingStatementPreview'
                 title={t('appDebug.feature.conversationOpener.title')}
                 description={t('appDebug.feature.conversationOpener.description')}
                 value={config.openingStatement}
-                onChange={(value) => onChange('openingStatement', value)}
+                onChange={value => onChange('openingStatement', value)}
               />
               <FeatureItem
                 icon={<SuggestedQuestionsAfterAnswerIcon />}
+                previewImgClassName='suggestedQuestionsAfterAnswerPreview'
                 title={t('appDebug.feature.suggestedQuestionsAfterAnswer.title')}
                 description={t('appDebug.feature.suggestedQuestionsAfterAnswer.description')}
                 value={config.suggestedQuestionsAfterAnswer}
-                onChange={(value) => onChange('suggestedQuestionsAfterAnswer', value)}
+                onChange={value => onChange('suggestedQuestionsAfterAnswer', value)}
+              />
+              {
+                showTextToSpeechItem && (
+                  <FeatureItem
+                    icon={<Speaker className='w-4 h-4 text-[#7839EE]' />}
+                    previewImgClassName='textToSpeechPreview'
+                    title={t('appDebug.feature.textToSpeech.title')}
+                    description={t('appDebug.feature.textToSpeech.description')}
+                    value={config.textToSpeech}
+                    onChange={value => onChange('textToSpeech', value)}
+                  />
+                )
+              }
+              {
+                showSpeechToTextItem && (
+                  <FeatureItem
+                    icon={<Microphone01 className='w-4 h-4 text-[#7839EE]' />}
+                    previewImgClassName='speechToTextPreview'
+                    title={t('appDebug.feature.speechToText.title')}
+                    description={t('appDebug.feature.speechToText.description')}
+                    value={config.speechToText}
+                    onChange={value => onChange('speechToText', value)}
+                  />
+                )
+              }
+              <FeatureItem
+                icon={<Citations className='w-4 h-4 text-[#FD853A]' />}
+                previewImgClassName='citationPreview'
+                title={t('appDebug.feature.citation.title')}
+                description={t('appDebug.feature.citation.description')}
+                value={config.citation}
+                onChange={value => onChange('citation', value)}
               />
             </>
           </FeatureGroup>
@@ -76,16 +123,49 @@ const ChooseFeature: FC<IChooseFeatureProps> = ({
             <>
               <FeatureItem
                 icon={<MoreLikeThisIcon />}
+                previewImgClassName='moreLikeThisPreview'
                 title={t('appDebug.feature.moreLikeThis.title')}
                 description={t('appDebug.feature.moreLikeThis.description')}
                 value={config.moreLikeThis}
-                onChange={(value) => onChange('moreLikeThis', value)}
+                onChange={value => onChange('moreLikeThis', value)}
               />
+              {
+                showTextToSpeechItem && (
+                  <FeatureItem
+                    icon={<Speaker className='w-4 h-4 text-[#7839EE]' />}
+                    previewImgClassName='textToSpeechPreview'
+                    title={t('appDebug.feature.textToSpeech.title')}
+                    description={t('appDebug.feature.textToSpeech.description')}
+                    value={config.textToSpeech}
+                    onChange={value => onChange('textToSpeech', value)}
+                  />
+                )
+              }
             </>
           </FeatureGroup>
         )}
+        <FeatureGroup title={t('appDebug.feature.toolbox.title')}>
+          <>
+            <FeatureItem
+              icon={<FileSearch02 className='w-4 h-4 text-[#039855]' />}
+              previewImgClassName=''
+              title={t('appDebug.feature.moderation.title')}
+              description={t('appDebug.feature.moderation.description')}
+              value={config.moderation}
+              onChange={value => onChange('moderation', value)}
+            />
+            {isChatApp && (
+              <FeatureItem
+                icon={<MessageFast className='w-4 h-4 text-[#444CE7]' />}
+                title={t('appDebug.feature.annotation.title')}
+                description={t('appDebug.feature.annotation.description')}
+                value={config.annotation}
+                onChange={value => onChange('annotation', value)}
+              />
+            )}
+          </>
+        </FeatureGroup>
       </div>
-
     </Modal>
   )
 }

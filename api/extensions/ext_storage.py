@@ -1,6 +1,8 @@
 import os
 import shutil
+from collections.abc import Generator
 from contextlib import closing
+from typing import Union
 
 import boto3
 from botocore.exceptions import ClientError
@@ -45,7 +47,13 @@ class Storage:
             with open(os.path.join(os.getcwd(), filename), "wb") as f:
                 f.write(data)
 
-    def load(self, filename):
+    def load(self, filename: str, stream: bool = False) -> Union[bytes, Generator]:
+        if stream:
+            return self.load_stream(filename)
+        else:
+            return self.load_once(filename)
+
+    def load_once(self, filename: str) -> bytes:
         if self.storage_type == 's3':
             try:
                 with closing(self.client) as client:
@@ -68,6 +76,34 @@ class Storage:
                 data = f.read()
 
         return data
+
+    def load_stream(self, filename: str) -> Generator:
+        def generate(filename: str = filename) -> Generator:
+            if self.storage_type == 's3':
+                try:
+                    with closing(self.client) as client:
+                        response = client.get_object(Bucket=self.bucket_name, Key=filename)
+                        for chunk in response['Body'].iter_chunks():
+                            yield chunk
+                except ClientError as ex:
+                    if ex.response['Error']['Code'] == 'NoSuchKey':
+                        raise FileNotFoundError("File not found")
+                    else:
+                        raise
+            else:
+                if not self.folder or self.folder.endswith('/'):
+                    filename = self.folder + filename
+                else:
+                    filename = self.folder + '/' + filename
+
+                if not os.path.exists(filename):
+                    raise FileNotFoundError("File not found")
+
+                with open(filename, "rb") as f:
+                    while chunk := f.read(4096):  # Read in chunks of 4KB
+                        yield chunk
+
+        return generate()
 
     def download(self, filename, target_filepath):
         if self.storage_type == 's3':

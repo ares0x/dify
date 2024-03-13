@@ -1,12 +1,10 @@
-# -*- coding:utf-8 -*-
 
 import json
 import logging
 
 import requests
 from flask import current_app
-from flask_restful import reqparse, Resource
-from werkzeug.exceptions import InternalServerError
+from flask_restful import Resource, reqparse
 
 from . import api
 
@@ -19,13 +17,26 @@ class VersionApi(Resource):
         args = parser.parse_args()
         check_update_url = current_app.config['CHECK_UPDATE_URL']
 
+        if not check_update_url:
+            return {
+                'version': '0.0.0',
+                'release_date': '',
+                'release_notes': '',
+                'can_auto_update': False
+            }
+
         try:
             response = requests.get(check_update_url, {
                 'current_version': args.get('current_version')
             })
         except Exception as error:
-            logging.exception("Check update error.")
-            raise InternalServerError()
+            logging.warning("Check update version error: {}.".format(str(error)))
+            return {
+                'version': args.get('current_version'),
+                'release_date': '',
+                'release_notes': '',
+                'can_auto_update': False
+            }
 
         content = json.loads(response.content)
         return {

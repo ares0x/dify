@@ -1,6 +1,7 @@
-import { API_PREFIX, MOCK_API_PREFIX, PUBLIC_API_PREFIX, IS_CE_EDITION } from '@/config'
+import { API_PREFIX, IS_CE_EDITION, PUBLIC_API_PREFIX } from '@/config'
 import Toast from '@/app/components/base/toast'
-
+import type { AnnotationReply, MessageEnd, MessageReplace, ThoughtItem } from '@/app/components/app/chat/type'
+import type { VisionFile } from '@/types/app'
 const TIME_OUT = 100000
 
 const ContentType = {
@@ -22,52 +23,77 @@ const baseOptions = {
 }
 
 export type IOnDataMoreInfo = {
-  conversationId: string | undefined
+  conversationId?: string
+  taskId?: string
   messageId: string
   errorMessage?: string
+  errorCode?: string
 }
 
 export type IOnData = (message: string, isFirstMessage: boolean, moreInfo: IOnDataMoreInfo) => void
+export type IOnThought = (though: ThoughtItem) => void
+export type IOnFile = (file: VisionFile) => void
+export type IOnMessageEnd = (messageEnd: MessageEnd) => void
+export type IOnMessageReplace = (messageReplace: MessageReplace) => void
+export type IOnAnnotationReply = (messageReplace: AnnotationReply) => void
 export type IOnCompleted = (hasError?: boolean) => void
-export type IOnError = (msg: string) => void
+export type IOnError = (msg: string, code?: string) => void
 
 type IOtherOptions = {
   isPublicAPI?: boolean
-  isMock?: boolean
+  bodyStringify?: boolean
   needAllResponseContent?: boolean
+  deleteContentType?: boolean
   onData?: IOnData // for stream
+  onThought?: IOnThought
+  onFile?: IOnFile
+  onMessageEnd?: IOnMessageEnd
+  onMessageReplace?: IOnMessageReplace
   onError?: IOnError
   onCompleted?: IOnCompleted // for stream
   getAbortController?: (abortController: AbortController) => void
 }
 
+type ResponseError = {
+  code: string
+  message: string
+  status: number
+}
+
+type FetchOptionType = Omit<RequestInit, 'body'> & {
+  params?: Record<string, any>
+  body?: BodyInit | Record<string, any> | null
+}
+
 function unicodeToChar(text: string) {
+  if (!text)
+    return ''
+
   return text.replace(/\\u[0-9a-f]{4}/g, (_match, p1) => {
     return String.fromCharCode(parseInt(p1, 16))
   })
 }
 
-
 export function format(text: string) {
   let res = text.trim()
-  if (res.startsWith('\n')) {
+  if (res.startsWith('\n'))
     res = res.replace('\n', '')
-  }
+
   return res.replaceAll('\n', '<br/>').replaceAll('```', '')
 }
 
-const handleStream = (response: any, onData: IOnData, onCompleted?: IOnCompleted) => {
+const handleStream = (response: Response, onData: IOnData, onCompleted?: IOnCompleted, onThought?: IOnThought, onMessageEnd?: IOnMessageEnd, onMessageReplace?: IOnMessageReplace, onFile?: IOnFile) => {
   if (!response.ok)
     throw new Error('Network response was not ok')
 
-  const reader = response.body.getReader()
+  const reader = response.body?.getReader()
   const decoder = new TextDecoder('utf-8')
   let buffer = ''
-  let bufferObj: any
+  let bufferObj: Record<string, any>
   let isFirstMessage = true
   function read() {
     let hasError = false
-    reader.read().then((result: any) => {
+    reader?.read().then((result: any) => {
       if (result.done) {
         onCompleted && onCompleted()
         return
@@ -77,56 +103,114 @@ const handleStream = (response: any, onData: IOnData, onCompleted?: IOnCompleted
       try {
         lines.forEach((message) => {
           if (message.startsWith('data: ')) { // check if it starts with data:
-            // console.log(message);
-            bufferObj = JSON.parse(message.substring(6)) // remove data: and parse as json
-            if (bufferObj.status === 400) {
+            try {
+              bufferObj = JSON.parse(message.substring(6)) as Record<string, any>// remove data: and parse as json
+            }
+            catch (e) {
+              // mute handle message cut off
+              onData('', isFirstMessage, {
+                conversationId: bufferObj?.conversation_id,
+                messageId: bufferObj?.message_id,
+              })
+              return
+            }
+            if (bufferObj.status === 400 || !bufferObj.event) {
               onData('', false, {
                 conversationId: undefined,
                 messageId: '',
-                errorMessage: bufferObj.message
+                errorMessage: bufferObj?.message,
+                errorCode: bufferObj?.code,
               })
               hasError = true
-              onCompleted && onCompleted(true)
+              onCompleted?.(true)
               return
             }
-            // can not use format here. Because message is splited.
-            onData(unicodeToChar(bufferObj.answer), isFirstMessage, {
-              conversationId: bufferObj.conversation_id,
-              messageId: bufferObj.id,
-            })
-            isFirstMessage = false
+            if (bufferObj.event === 'message' || bufferObj.event === 'agent_message') {
+              // can not use format here. Because message is splited.
+              onData(unicodeToChar(bufferObj.answer), isFirstMessage, {
+                conversationId: bufferObj.conversation_id,
+                taskId: bufferObj.task_id,
+                messageId: bufferObj.id,
+              })
+              isFirstMessage = false
+            }
+            else if (bufferObj.event === 'agent_thought') {
+              onThought?.(bufferObj as ThoughtItem)
+            }
+            else if (bufferObj.event === 'message_file') {
+              onFile?.(bufferObj as VisionFile)
+            }
+            else if (bufferObj.event === 'message_end') {
+              onMessageEnd?.(bufferObj as MessageEnd)
+            }
+            else if (bufferObj.event === 'message_replace') {
+              onMessageReplace?.(bufferObj as MessageReplace)
+            }
           }
         })
         buffer = lines[lines.length - 1]
-      } catch (e) {
+      }
+      catch (e) {
         onData('', false, {
           conversationId: undefined,
           messageId: '',
-          errorMessage: e + ''
+          errorMessage: `${e}`,
         })
         hasError = true
-        onCompleted && onCompleted(true)
+        onCompleted?.(true)
         return
       }
-      if (!hasError) {
+      if (!hasError)
         read()
-      }
     })
   }
   read()
 }
 
-const baseFetch = (url: string, fetchOptions: any, { isPublicAPI = false, isMock = false, needAllResponseContent }: IOtherOptions) => {
-  const options = Object.assign({}, baseOptions, fetchOptions)
+const baseFetch = <T>(
+  url: string,
+  fetchOptions: FetchOptionType,
+  {
+    isPublicAPI = false,
+    bodyStringify = true,
+    needAllResponseContent,
+    deleteContentType,
+    getAbortController,
+  }: IOtherOptions,
+): Promise<T> => {
+  const options: typeof baseOptions & FetchOptionType = Object.assign({}, baseOptions, fetchOptions)
+  if (getAbortController) {
+    const abortController = new AbortController()
+    getAbortController(abortController)
+    options.signal = abortController.signal
+  }
   if (isPublicAPI) {
     const sharedToken = globalThis.location.pathname.split('/').slice(-1)[0]
-    options.headers.set('Authorization', `bearer ${sharedToken}`)
+    const accessToken = localStorage.getItem('token') || JSON.stringify({ [sharedToken]: '' })
+    let accessTokenJson = { [sharedToken]: '' }
+    try {
+      accessTokenJson = JSON.parse(accessToken)
+    }
+    catch (e) {
+
+    }
+    options.headers.set('Authorization', `Bearer ${accessTokenJson[sharedToken]}`)
+  }
+  else {
+    const accessToken = localStorage.getItem('console_token') || ''
+    options.headers.set('Authorization', `Bearer ${accessToken}`)
   }
 
-  let urlPrefix = isPublicAPI ? PUBLIC_API_PREFIX : API_PREFIX
-  if (isMock)
-    urlPrefix = MOCK_API_PREFIX
+  if (deleteContentType) {
+    options.headers.delete('Content-Type')
+  }
+  else {
+    const contentType = options.headers.get('Content-Type')
+    if (!contentType)
+      options.headers.set('Content-Type', ContentType.json)
+  }
 
+  const urlPrefix = isPublicAPI ? PUBLIC_API_PREFIX : API_PREFIX
   let urlWithPrefix = `${urlPrefix}${url.startsWith('/') ? url : `/${url}`}`
 
   const { method, params, body } = options
@@ -145,7 +229,7 @@ const baseFetch = (url: string, fetchOptions: any, { isPublicAPI = false, isMock
     delete options.params
   }
 
-  if (body)
+  if (body && bodyStringify)
     options.body = JSON.stringify(body)
 
   // Handle timeout
@@ -156,55 +240,50 @@ const baseFetch = (url: string, fetchOptions: any, { isPublicAPI = false, isMock
       }, TIME_OUT)
     }),
     new Promise((resolve, reject) => {
-      globalThis.fetch(urlWithPrefix, options)
-        .then((res: any) => {
+      globalThis.fetch(urlWithPrefix, options as RequestInit)
+        .then((res) => {
           const resClone = res.clone()
           // Error handler
-          if (!/^(2|3)\d{2}$/.test(res.status)) {
+          if (!/^(2|3)\d{2}$/.test(String(res.status))) {
             const bodyJson = res.json()
             switch (res.status) {
               case 401: {
                 if (isPublicAPI) {
-                  Toast.notify({ type: 'error', message: 'Invalid token' })
-                  return
+                  return bodyJson.then((data: ResponseError) => {
+                    Toast.notify({ type: 'error', message: data.message })
+                    return Promise.reject(data)
+                  })
                 }
                 const loginUrl = `${globalThis.location.origin}/signin`
-                if (IS_CE_EDITION) {
-                  bodyJson.then((data: any) => {
-                    if (data.code === 'not_setup') {
-                      globalThis.location.href = `${globalThis.location.origin}/install`
-                    } else {
-                      if (location.pathname === '/signin') {
-                        bodyJson.then((data: any) => {
-                          Toast.notify({ type: 'error', message: data.message })
-                        })
-                      } else {
-                        globalThis.location.href = loginUrl
-                      }
-                    }
-                  })
-                  return Promise.reject()
-                }
-                globalThis.location.href = loginUrl
+                bodyJson.then((data: ResponseError) => {
+                  if (data.code === 'init_validate_failed' && IS_CE_EDITION)
+                    Toast.notify({ type: 'error', message: data.message, duration: 4000 })
+                  else if (data.code === 'not_init_validated' && IS_CE_EDITION)
+                    globalThis.location.href = `${globalThis.location.origin}/init`
+                  else if (data.code === 'not_setup' && IS_CE_EDITION)
+                    globalThis.location.href = `${globalThis.location.origin}/install`
+                  else if (location.pathname !== '/signin' || !IS_CE_EDITION)
+                    globalThis.location.href = loginUrl
+                  else
+                    Toast.notify({ type: 'error', message: data.message })
+                }).catch(() => {
+                  // Handle any other errors
+                  globalThis.location.href = loginUrl
+                })
+
                 break
               }
               case 403:
-                new Promise(() => {
-                  bodyJson.then((data: any) => {
-                    Toast.notify({ type: 'error', message: data.message })
-                    if (data.code === 'already_setup') {
-                      globalThis.location.href = `${globalThis.location.origin}/signin`
-                    }
-                  })
+                bodyJson.then((data: ResponseError) => {
+                  Toast.notify({ type: 'error', message: data.message })
+                  if (data.code === 'already_setup')
+                    globalThis.location.href = `${globalThis.location.origin}/signin`
                 })
                 break
               // fall through
               default:
-                // eslint-disable-next-line no-new
-                new Promise(() => {
-                  bodyJson.then((data: any) => {
-                    Toast.notify({ type: 'error', message: data.message })
-                  })
+                bodyJson.then((data: ResponseError) => {
+                  Toast.notify({ type: 'error', message: data.message })
                 })
             }
             return Promise.reject(resClone)
@@ -212,12 +291,12 @@ const baseFetch = (url: string, fetchOptions: any, { isPublicAPI = false, isMock
 
           // handle delete api. Delete api not return content.
           if (res.status === 204) {
-            resolve({ result: "success" })
+            resolve({ result: 'success' })
             return
           }
 
           // return data
-          const data = options.headers.get('Content-type') === ContentType.download ? res.blob() : res.json()
+          const data: Promise<T> = options.headers.get('Content-type') === ContentType.download ? res.blob() : res.json()
 
           resolve(needAllResponseContent ? resClone : data)
         })
@@ -226,36 +305,55 @@ const baseFetch = (url: string, fetchOptions: any, { isPublicAPI = false, isMock
           reject(err)
         })
     }),
-  ])
+  ]) as Promise<T>
 }
 
-export const upload = (options: any): Promise<any> => {
+export const upload = (options: any, isPublicAPI?: boolean, url?: string, searchParams?: string): Promise<any> => {
+  const urlPrefix = isPublicAPI ? PUBLIC_API_PREFIX : API_PREFIX
+  let token = ''
+  if (isPublicAPI) {
+    const sharedToken = globalThis.location.pathname.split('/').slice(-1)[0]
+    const accessToken = localStorage.getItem('token') || JSON.stringify({ [sharedToken]: '' })
+    let accessTokenJson = { [sharedToken]: '' }
+    try {
+      accessTokenJson = JSON.parse(accessToken)
+    }
+    catch (e) {
+
+    }
+    token = accessTokenJson[sharedToken]
+  }
+  else {
+    const accessToken = localStorage.getItem('console_token') || ''
+    token = accessToken
+  }
   const defaultOptions = {
     method: 'POST',
-    url: `${API_PREFIX}/files/upload`,
-    headers: {},
+    url: (url ? `${urlPrefix}${url}` : `${urlPrefix}/files/upload`) + (searchParams || ''),
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
     data: {},
   }
   options = {
     ...defaultOptions,
     ...options,
     headers: { ...defaultOptions.headers, ...options.headers },
-  };
-  return new Promise(function (resolve, reject) {
+  }
+  return new Promise((resolve, reject) => {
     const xhr = options.xhr
-    xhr.open(options.method, options.url);
-    for (const key in options.headers) {
-      xhr.setRequestHeader(key, options.headers[key]);
-    }
+    xhr.open(options.method, options.url)
+    for (const key in options.headers)
+      xhr.setRequestHeader(key, options.headers[key])
+
     xhr.withCredentials = true
     xhr.responseType = 'json'
     xhr.onreadystatechange = function () {
       if (xhr.readyState === 4) {
-        if (xhr.status === 201) {
+        if (xhr.status === 201)
           resolve(xhr.response)
-        } else {
+        else
           reject(xhr)
-        }
       }
     }
     xhr.upload.onprogress = options.onprogress
@@ -263,13 +361,17 @@ export const upload = (options: any): Promise<any> => {
   })
 }
 
-export const ssePost = (url: string, fetchOptions: any, { isPublicAPI = false, onData, onCompleted, onError, getAbortController }: IOtherOptions) => {
+export const ssePost = (url: string, fetchOptions: FetchOptionType, { isPublicAPI = false, onData, onCompleted, onThought, onFile, onMessageEnd, onMessageReplace, onError, getAbortController }: IOtherOptions) => {
   const abortController = new AbortController()
 
   const options = Object.assign({}, baseOptions, {
     method: 'POST',
     signal: abortController.signal,
   }, fetchOptions)
+
+  const contentType = options.headers.get('Content-Type')
+  if (!contentType)
+    options.headers.set('Content-Type', ContentType.json)
 
   getAbortController?.(abortController)
 
@@ -280,74 +382,74 @@ export const ssePost = (url: string, fetchOptions: any, { isPublicAPI = false, o
   if (body)
     options.body = JSON.stringify(body)
 
-  globalThis.fetch(urlWithPrefix, options)
-    .then((res: any) => {
-      // debugger
-      if (!/^(2|3)\d{2}$/.test(res.status)) {
-        // eslint-disable-next-line no-new
-        new Promise(() => {
-          res.json().then((data: any) => {
-            Toast.notify({ type: 'error', message: data.message || 'Server Error' })
-          })
+  globalThis.fetch(urlWithPrefix, options as RequestInit)
+    .then((res) => {
+      if (!/^(2|3)\d{2}$/.test(String(res.status))) {
+        res.json().then((data: any) => {
+          Toast.notify({ type: 'error', message: data.message || 'Server Error' })
         })
         onError?.('Server Error')
         return
       }
       return handleStream(res, (str: string, isFirstMessage: boolean, moreInfo: IOnDataMoreInfo) => {
         if (moreInfo.errorMessage) {
-          Toast.notify({ type: 'error', message: moreInfo.errorMessage })
+          onError?.(moreInfo.errorMessage, moreInfo.errorCode)
+          if (moreInfo.errorMessage !== 'AbortError: The user aborted a request.')
+            Toast.notify({ type: 'error', message: moreInfo.errorMessage })
           return
         }
         onData?.(str, isFirstMessage, moreInfo)
-      }, onCompleted)
+      }, onCompleted, onThought, onMessageEnd, onMessageReplace, onFile)
     }).catch((e) => {
-      // debugger
-      Toast.notify({ type: 'error', message: e })
+      if (e.toString() !== 'AbortError: The user aborted a request.')
+        Toast.notify({ type: 'error', message: e })
       onError?.(e)
     })
 }
 
-export const request = (url: string, options = {}, otherOptions?: IOtherOptions) => {
-  return baseFetch(url, options, otherOptions || {})
+// base request
+export const request = <T>(url: string, options = {}, otherOptions?: IOtherOptions) => {
+  return baseFetch<T>(url, options, otherOptions || {})
 }
 
-export const get = (url: string, options = {}, otherOptions?: IOtherOptions) => {
-  return request(url, Object.assign({}, options, { method: 'GET' }), otherOptions)
+// request methods
+export const get = <T>(url: string, options = {}, otherOptions?: IOtherOptions) => {
+  return request<T>(url, Object.assign({}, options, { method: 'GET' }), otherOptions)
 }
 
 // For public API
-export const getPublic = (url: string, options = {}, otherOptions?: IOtherOptions) => {
-  return get(url, options, { ...otherOptions, isPublicAPI: true })
+export const getPublic = <T>(url: string, options = {}, otherOptions?: IOtherOptions) => {
+  return get<T>(url, options, { ...otherOptions, isPublicAPI: true })
 }
 
-export const post = (url: string, options = {}, otherOptions?: IOtherOptions) => {
-  return request(url, Object.assign({}, options, { method: 'POST' }), otherOptions)
+export const post = <T>(url: string, options = {}, otherOptions?: IOtherOptions) => {
+  return request<T>(url, Object.assign({}, options, { method: 'POST' }), otherOptions)
 }
 
-export const postPublic = (url: string, options = {}, otherOptions?: IOtherOptions) => {
-  return post(url, options, { ...otherOptions, isPublicAPI: true })
+export const postPublic = <T>(url: string, options = {}, otherOptions?: IOtherOptions) => {
+  return post<T>(url, options, { ...otherOptions, isPublicAPI: true })
 }
 
-export const put = (url: string, options = {}, otherOptions?: IOtherOptions) => {
-  return request(url, Object.assign({}, options, { method: 'PUT' }), otherOptions)
+export const put = <T>(url: string, options = {}, otherOptions?: IOtherOptions) => {
+  return request<T>(url, Object.assign({}, options, { method: 'PUT' }), otherOptions)
 }
 
-export const putPublic = (url: string, options = {}, otherOptions?: IOtherOptions) => {
-  return put(url, options, { ...otherOptions, isPublicAPI: true })
+export const putPublic = <T>(url: string, options = {}, otherOptions?: IOtherOptions) => {
+  return put<T>(url, options, { ...otherOptions, isPublicAPI: true })
 }
 
-export const del = (url: string, options = {}, otherOptions?: IOtherOptions) => {
-  return request(url, Object.assign({}, options, { method: 'DELETE' }), otherOptions)
+export const del = <T>(url: string, options = {}, otherOptions?: IOtherOptions) => {
+  return request<T>(url, Object.assign({}, options, { method: 'DELETE' }), otherOptions)
 }
 
-export const delPublic = (url: string, options = {}, otherOptions?: IOtherOptions) => {
-  return del(url, options, { ...otherOptions, isPublicAPI: true })
+export const delPublic = <T>(url: string, options = {}, otherOptions?: IOtherOptions) => {
+  return del<T>(url, options, { ...otherOptions, isPublicAPI: true })
 }
 
-export const patch = (url: string, options = {}, otherOptions?: IOtherOptions) => {
-  return request(url, Object.assign({}, options, { method: 'PATCH' }), otherOptions)
+export const patch = <T>(url: string, options = {}, otherOptions?: IOtherOptions) => {
+  return request<T>(url, Object.assign({}, options, { method: 'PATCH' }), otherOptions)
 }
 
-export const patchPublic = (url: string, options = {}, otherOptions?: IOtherOptions) => {
-  return patch(url, options, { ...otherOptions, isPublicAPI: true })
+export const patchPublic = <T>(url: string, options = {}, otherOptions?: IOtherOptions) => {
+  return patch<T>(url, options, { ...otherOptions, isPublicAPI: true })
 }

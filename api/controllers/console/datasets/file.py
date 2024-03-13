@@ -1,50 +1,45 @@
-import datetime
-import hashlib
-import tempfile
-import time
-import uuid
-from pathlib import Path
+from flask import current_app, request
+from flask_login import current_user
+from flask_restful import Resource, marshal_with
 
-from cachetools import TTLCache
-from flask import request, current_app
-from flask_login import login_required, current_user
-from flask_restful import Resource, marshal_with, fields
-from werkzeug.exceptions import NotFound
-
+import services
 from controllers.console import api
-from controllers.console.datasets.error import NoFileUploadedError, TooManyFilesError, FileTooLargeError, \
-    UnsupportedFileTypeError
+from controllers.console.datasets.error import (
+    FileTooLargeError,
+    NoFileUploadedError,
+    TooManyFilesError,
+    UnsupportedFileTypeError,
+)
 from controllers.console.setup import setup_required
-from controllers.console.wraps import account_initialization_required
-from core.index.readers.html_parser import HTMLParser
-from core.index.readers.pdf_parser import PDFParser
-from extensions.ext_storage import storage
-from libs.helper import TimestampField
-from extensions.ext_database import db
-from models.model import UploadFile
+from controllers.console.wraps import account_initialization_required, cloud_edition_billing_resource_check
+from fields.file_fields import file_fields, upload_config_fields
+from libs.login import login_required
+from services.file_service import ALLOWED_EXTENSIONS, UNSTRUSTURED_ALLOWED_EXTENSIONS, FileService
 
-cache = TTLCache(maxsize=None, ttl=30)
-
-FILE_SIZE_LIMIT = 15 * 1024 * 1024  # 15MB
-ALLOWED_EXTENSIONS = ['txt', 'markdown', 'md', 'pdf', 'html', 'htm']
 PREVIEW_WORDS_LIMIT = 3000
 
 
 class FileApi(Resource):
-    file_fields = {
-        'id': fields.String,
-        'name': fields.String,
-        'size': fields.Integer,
-        'extension': fields.String,
-        'mime_type': fields.String,
-        'created_by': fields.String,
-        'created_at': TimestampField,
-    }
+
+    @setup_required
+    @login_required
+    @account_initialization_required
+    @marshal_with(upload_config_fields)
+    def get(self):
+        file_size_limit = current_app.config.get("UPLOAD_FILE_SIZE_LIMIT")
+        batch_count_limit = current_app.config.get("UPLOAD_FILE_BATCH_LIMIT")
+        image_file_size_limit = current_app.config.get("UPLOAD_IMAGE_FILE_SIZE_LIMIT")
+        return {
+            'file_size_limit': file_size_limit,
+            'batch_count_limit': batch_count_limit,
+            'image_file_size_limit': image_file_size_limit
+        }, 200
 
     @setup_required
     @login_required
     @account_initialization_required
     @marshal_with(file_fields)
+    @cloud_edition_billing_resource_check(resource='documents')
     def post(self):
 
         # get file from request
@@ -56,43 +51,12 @@ class FileApi(Resource):
 
         if len(request.files) > 1:
             raise TooManyFilesError()
-
-        file_content = file.read()
-        file_size = len(file_content)
-
-        if file_size > FILE_SIZE_LIMIT:
-            message = "({file_size} > {FILE_SIZE_LIMIT})"
-            raise FileTooLargeError(message)
-
-        extension = file.filename.split('.')[-1]
-        if extension not in ALLOWED_EXTENSIONS:
+        try:
+            upload_file = FileService.upload_file(file, current_user)
+        except services.errors.file.FileTooLargeError as file_too_large_error:
+            raise FileTooLargeError(file_too_large_error.description)
+        except services.errors.file.UnsupportedFileTypeError:
             raise UnsupportedFileTypeError()
-
-        # user uuid as file name
-        file_uuid = str(uuid.uuid4())
-        file_key = 'upload_files/' + current_user.current_tenant_id + '/' + file_uuid + '.' + extension
-
-        # save file to storage
-        storage.save(file_key, file_content)
-
-        # save file to db
-        config = current_app.config
-        upload_file = UploadFile(
-            tenant_id=current_user.current_tenant_id,
-            storage_type=config['STORAGE_TYPE'],
-            key=file_key,
-            name=file.filename,
-            size=file_size,
-            extension=extension,
-            mime_type=file.mimetype,
-            created_by=current_user.id,
-            created_at=datetime.datetime.utcnow(),
-            used=False,
-            hash=hashlib.sha3_256(file_content).hexdigest()
-        )
-
-        db.session.add(upload_file)
-        db.session.commit()
 
         return upload_file, 201
 
@@ -103,45 +67,20 @@ class FilePreviewApi(Resource):
     @account_initialization_required
     def get(self, file_id):
         file_id = str(file_id)
-
-        key = file_id + request.path
-        cached_response = cache.get(key)
-        if cached_response and time.time() - cached_response['timestamp'] < cache.ttl:
-            return cached_response['response']
-
-        upload_file = db.session.query(UploadFile) \
-            .filter(UploadFile.id == file_id) \
-            .first()
-
-        if not upload_file:
-            raise NotFound("File not found")
-
-        # extract text from file
-        extension = upload_file.extension
-        if extension not in ALLOWED_EXTENSIONS:
-            raise UnsupportedFileTypeError()
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            suffix = Path(upload_file.key).suffix
-            filepath = f"{temp_dir}/{next(tempfile._get_candidate_names())}{suffix}"
-            storage.download(upload_file.key, filepath)
-
-            if extension == 'pdf':
-                parser = PDFParser({'upload_file': upload_file})
-                text = parser.parse_file(Path(filepath))
-            elif extension in ['html', 'htm']:
-                # Use BeautifulSoup to extract text
-                parser = HTMLParser()
-                text = parser.parse_file(Path(filepath))
-            else:
-                # ['txt', 'markdown', 'md']
-                with open(filepath, "rb") as fp:
-                    data = fp.read()
-                    text = data.decode(encoding='utf-8').strip() if data else ''
-
-        text = text[0:PREVIEW_WORDS_LIMIT] if text else ''
+        text = FileService.get_file_preview(file_id)
         return {'content': text}
+
+
+class FileSupportTypeApi(Resource):
+    @setup_required
+    @login_required
+    @account_initialization_required
+    def get(self):
+        etl_type = current_app.config['ETL_TYPE']
+        allowed_extensions = UNSTRUSTURED_ALLOWED_EXTENSIONS if etl_type == 'Unstructured' else ALLOWED_EXTENSIONS
+        return {'allowed_extensions': allowed_extensions}
 
 
 api.add_resource(FileApi, '/files/upload')
 api.add_resource(FilePreviewApi, '/files/<uuid:file_id>/preview')
+api.add_resource(FileSupportTypeApi, '/files/support-type')

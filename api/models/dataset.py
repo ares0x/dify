@@ -3,20 +3,22 @@ import pickle
 from json import JSONDecodeError
 
 from sqlalchemy import func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from extensions.ext_database import db
 from models.account import Account
 from models.model import App, UploadFile
+
 
 class Dataset(db.Model):
     __tablename__ = 'datasets'
     __table_args__ = (
         db.PrimaryKeyConstraint('id', name='dataset_pkey'),
         db.Index('dataset_tenant_idx', 'tenant_id'),
+        db.Index('retrieval_model_idx', "retrieval_model", postgresql_using='gin')
     )
 
-    INDEXING_TECHNIQUE_LIST = ['high_quality', 'economy']
+    INDEXING_TECHNIQUE_LIST = ['high_quality', 'economy', None]
 
     id = db.Column(UUID, server_default=db.text('uuid_generate_v4()'))
     tenant_id = db.Column(UUID, nullable=False)
@@ -35,6 +37,10 @@ class Dataset(db.Model):
     updated_by = db.Column(UUID, nullable=True)
     updated_at = db.Column(db.DateTime, nullable=False,
                            server_default=db.text('CURRENT_TIMESTAMP(0)'))
+    embedding_model = db.Column(db.String(255), nullable=True)
+    embedding_model_provider = db.Column(db.String(255), nullable=True)
+    collection_binding_id = db.Column(UUID, nullable=True)
+    retrieval_model = db.Column(JSONB, nullable=True)
 
     @property
     def dataset_keyword_table(self):
@@ -67,10 +73,53 @@ class Dataset(db.Model):
         return db.session.query(func.count(Document.id)).filter(Document.dataset_id == self.id).scalar()
 
     @property
+    def available_document_count(self):
+        return db.session.query(func.count(Document.id)).filter(
+            Document.dataset_id == self.id,
+            Document.indexing_status == 'completed',
+            Document.enabled == True,
+            Document.archived == False
+        ).scalar()
+
+    @property
+    def available_segment_count(self):
+        return db.session.query(func.count(DocumentSegment.id)).filter(
+            DocumentSegment.dataset_id == self.id,
+            DocumentSegment.status == 'completed',
+            DocumentSegment.enabled == True
+        ).scalar()
+
+    @property
     def word_count(self):
         return Document.query.with_entities(func.coalesce(func.sum(Document.word_count))) \
             .filter(Document.dataset_id == self.id).scalar()
 
+    @property
+    def doc_form(self):
+        document = db.session.query(Document).filter(
+            Document.dataset_id == self.id).first()
+        if document:
+            return document.doc_form
+        return None
+
+    @property
+    def retrieval_model_dict(self):
+        default_retrieval_model = {
+            'search_method': 'semantic_search',
+            'reranking_enable': False,
+            'reranking_model': {
+                'reranking_provider_name': '',
+                'reranking_model_name': ''
+            },
+            'top_k': 2,
+            'score_threshold_enabled': False
+        }
+        return self.retrieval_model if self.retrieval_model else default_retrieval_model
+
+    @staticmethod
+    def gen_collection_name_by_id(dataset_id: str) -> str:
+        normalized_dataset_id = dataset_id.replace("-", "_")
+        return f'Vector_index_{normalized_dataset_id}_Node'
 
 class DatasetProcessRule(db.Model):
     __tablename__ = 'dataset_process_rules'
@@ -98,7 +147,8 @@ class DatasetProcessRule(db.Model):
         ],
         'segmentation': {
             'delimiter': '\n',
-            'max_tokens': 1000
+            'max_tokens': 500,
+            'chunk_overlap': 50
         }
     }
 
@@ -189,8 +239,11 @@ class Document(db.Model):
                            server_default=db.text('CURRENT_TIMESTAMP(0)'))
     doc_type = db.Column(db.String(40), nullable=True)
     doc_metadata = db.Column(db.JSON, nullable=True)
+    doc_form = db.Column(db.String(
+        255), nullable=False, server_default=db.text("'text_model'::character varying"))
+    doc_language = db.Column(db.String(255), nullable=True)
 
-    DATA_SOURCES = ['upload_file']
+    DATA_SOURCES = ['upload_file', 'notion_import']
 
     @property
     def display_status(self):
@@ -242,12 +295,14 @@ class Document(db.Model):
                             'created_at': file_detail.created_at.timestamp()
                         }
                     }
+            elif self.data_source_type == 'notion_import':
+                return json.loads(self.data_source_info)
         return {}
 
     @property
     def average_segment_length(self):
         if self.word_count and self.word_count != 0 and self.segment_count and self.segment_count != 0:
-            return self.word_count//self.segment_count
+            return self.word_count // self.segment_count
         return 0
 
     @property
@@ -258,7 +313,7 @@ class Document(db.Model):
 
     @property
     def dataset(self):
-        return Dataset.query.get(self.dataset_id)
+        return db.session.query(Dataset).filter(Dataset.id == self.dataset_id).one_or_none()
 
     @property
     def segment_count(self):
@@ -289,6 +344,7 @@ class DocumentSegment(db.Model):
     document_id = db.Column(UUID, nullable=False)
     position = db.Column(db.Integer, nullable=False)
     content = db.Column(db.Text, nullable=False)
+    answer = db.Column(db.Text, nullable=True)
     word_count = db.Column(db.Integer, nullable=False)
     tokens = db.Column(db.Integer, nullable=False)
 
@@ -308,6 +364,9 @@ class DocumentSegment(db.Model):
     created_by = db.Column(UUID, nullable=False)
     created_at = db.Column(db.DateTime, nullable=False,
                            server_default=db.text('CURRENT_TIMESTAMP(0)'))
+    updated_by = db.Column(UUID, nullable=True)
+    updated_at = db.Column(db.DateTime, nullable=False,
+                           server_default=db.text('CURRENT_TIMESTAMP(0)'))
     indexing_at = db.Column(db.DateTime, nullable=True)
     completed_at = db.Column(db.DateTime, nullable=True)
     error = db.Column(db.Text, nullable=True)
@@ -320,16 +379,6 @@ class DocumentSegment(db.Model):
     @property
     def document(self):
         return db.session.query(Document).filter(Document.id == self.document_id).first()
-
-    @property
-    def embedding(self):
-        embedding = db.session.query(Embedding).filter(Embedding.hash == self.index_node_hash).first() \
-            if self.index_node_hash else None
-
-        if embedding:
-            return embedding.embedding
-
-        return None
 
     @property
     def previous_segment(self):
@@ -393,17 +442,30 @@ class DatasetKeywordTable(db.Model):
 
     @property
     def keyword_table_dict(self):
-        return json.loads(self.keyword_table) if self.keyword_table else None
+        class SetDecoder(json.JSONDecoder):
+            def __init__(self, *args, **kwargs):
+                super().__init__(object_hook=self.object_hook, *args, **kwargs)
+
+            def object_hook(self, dct):
+                if isinstance(dct, dict):
+                    for keyword, node_idxs in dct.items():
+                        if isinstance(node_idxs, list):
+                            dct[keyword] = set(node_idxs)
+                return dct
+
+        return json.loads(self.keyword_table, cls=SetDecoder) if self.keyword_table else None
 
 
 class Embedding(db.Model):
     __tablename__ = 'embeddings'
     __table_args__ = (
         db.PrimaryKeyConstraint('id', name='embedding_pkey'),
-        db.UniqueConstraint('hash', name='embedding_hash_idx')
+        db.UniqueConstraint('model_name', 'hash', name='embedding_hash_idx')
     )
 
     id = db.Column(UUID, primary_key=True, server_default=db.text('uuid_generate_v4()'))
+    model_name = db.Column(db.String(40), nullable=False,
+                           server_default=db.text("'text-embedding-ada-002'::character varying"))
     hash = db.Column(db.String(64), nullable=False)
     embedding = db.Column(db.LargeBinary, nullable=False)
     created_at = db.Column(db.DateTime, nullable=False, server_default=db.text('CURRENT_TIMESTAMP(0)'))
@@ -413,3 +475,19 @@ class Embedding(db.Model):
 
     def get_embedding(self) -> list[float]:
         return pickle.loads(self.embedding)
+
+
+class DatasetCollectionBinding(db.Model):
+    __tablename__ = 'dataset_collection_bindings'
+    __table_args__ = (
+        db.PrimaryKeyConstraint('id', name='dataset_collection_bindings_pkey'),
+        db.Index('provider_model_name_idx', 'provider_name', 'model_name')
+
+    )
+
+    id = db.Column(UUID, primary_key=True, server_default=db.text('uuid_generate_v4()'))
+    provider_name = db.Column(db.String(40), nullable=False)
+    model_name = db.Column(db.String(40), nullable=False)
+    type = db.Column(db.String(40), server_default=db.text("'dataset'::character varying"), nullable=False)
+    collection_name = db.Column(db.String(64), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, server_default=db.text('CURRENT_TIMESTAMP(0)'))

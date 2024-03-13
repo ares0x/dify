@@ -1,27 +1,33 @@
-# -*- coding:utf-8 -*-
 from datetime import datetime
 
 import pytz
 from flask import current_app, request
-from flask_login import login_required, current_user
-from flask_restful import Resource, reqparse, fields, marshal_with
+from flask_login import current_user
+from flask_restful import Resource, fields, marshal_with, reqparse
 
+from constants.languages import supported_language
 from controllers.console import api
 from controllers.console.setup import setup_required
-from controllers.console.workspace.error import AccountAlreadyInitedError, InvalidInvitationCodeError, \
-    RepeatPasswordNotMatchError
+from controllers.console.workspace.error import (
+    AccountAlreadyInitedError,
+    CurrentPasswordIncorrectError,
+    InvalidInvitationCodeError,
+    RepeatPasswordNotMatchError,
+)
 from controllers.console.wraps import account_initialization_required
-from libs.helper import TimestampField, supported_language, timezone
 from extensions.ext_database import db
-from models.account import InvitationCode, AccountIntegrate
+from libs.helper import TimestampField, timezone
+from libs.login import login_required
+from models.account import AccountIntegrate, InvitationCode
 from services.account_service import AccountService
-
+from services.errors.account import CurrentPasswordIncorrectError as ServiceCurrentPasswordIncorrectError
 
 account_fields = {
     'id': fields.String,
     'name': fields.String,
     'avatar': fields.String,
     'email': fields.String,
+    'is_password_set': fields.Boolean,
     'interface_language': fields.String,
     'interface_theme': fields.String,
     'timezone': fields.String,
@@ -194,8 +200,11 @@ class AccountPasswordApi(Resource):
         if args['new_password'] != args['repeat_new_password']:
             raise RepeatPasswordNotMatchError()
 
-        AccountService.update_account_password(
-            current_user, args['password'], args['new_password'])
+        try:
+            AccountService.update_account_password(
+                current_user, args['password'], args['new_password'])
+        except ServiceCurrentPasswordIncorrectError:
+            raise CurrentPasswordIncorrectError()
 
         return {"result": "success"}
 

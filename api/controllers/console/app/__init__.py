@@ -1,9 +1,8 @@
-from flask_login import current_user
-from werkzeug.exceptions import NotFound
-
 from controllers.console.app.error import AppUnavailableError
 from extensions.ext_database import db
+from flask_login import current_user
 from models.model import App
+from werkzeug.exceptions import NotFound
 
 
 def _get_app(app_id, mode=None):
@@ -17,6 +16,6 @@ def _get_app(app_id, mode=None):
         raise NotFound("App not found")
 
     if mode and app.mode != mode:
-        raise AppUnavailableError()
+        raise NotFound("The {} app not found".format(mode))
 
     return app
